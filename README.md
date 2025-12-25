@@ -1,5 +1,9 @@
 # ENC Client Documentation
 
+> **Part of the [ENC Ecosystem](https://github.com/Pranjalab/enc)**
+>
+> 📚 **[Read the Full Documentation](https://pranjalab.github.io/enc)**
+
 The **ENC Client** (`enc-cli`) is your secure gateway to the ENC ecosystem. It allows you to create, manage, and edit encrypted projects from your local machine, seamlessly integrating them with your favorite tools.
 
 ## 🚀 Installation
