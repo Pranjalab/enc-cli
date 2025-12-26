@@ -336,6 +336,13 @@ def uninstall():
     if not click.confirm("This will remove your ENC configuration (~/.enc). Continue?"):
         return
 
+    # 0. Unmount all first to prevent hangs
+    try:
+        console.print("Unmounting all projects...")
+        enc_manager.unmount_all()
+    except Exception as e:
+        console.print(f"[yellow]Warning during unmount: {e}[/yellow]")
+
     # 1. Remove ~/.enc
     enc_dir = os.path.expanduser("~/.enc")
     if os.path.exists(enc_dir):
@@ -429,7 +436,7 @@ def check_connection():
 def login(password):
     """Authenticate with the ENC Server."""
     if not enc_manager.login(password=password):
-        sys.exit(1)
+        raise click.ClickException("Authentication failed. Please check your credentials.")
 
 @cli.group("project")
 def project_group():
