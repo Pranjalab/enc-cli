@@ -256,8 +256,8 @@ class Enc:
         
         if ssh_key:
             cmd.extend(["-i", os.path.expanduser(ssh_key)])
-            # Avoid falling back to password if key is provided
-            cmd.extend(["-o", "PreferredAuthentications=publickey"])
+            # Allow fallback to password if key fails (important for bootstrap/admin)
+            cmd.extend(["-o", "PreferredAuthentications=publickey,password"])
         
         target = f"{username}@{host}"
         return cmd, target
