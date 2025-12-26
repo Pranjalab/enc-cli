@@ -1,5 +1,6 @@
 
 import click
+import sys
 import os
 from rich.console import Console
 from rich.panel import Panel
@@ -227,6 +228,184 @@ def internal_watchdog(ppid):
 @cli.group()
 def setup():
     """Setup and configuration utilities."""
+    pass
+
+@cli.command("install")
+def install():
+    """Install system dependencies and configure environment."""
+    import platform
+    import subprocess
+    import shutil
+
+    console.print(Panel("ENC Installation & Setup", title="enc install", style="bold cyan"))
+    
+    os_type = platform.system()
+    console.print(f"Detected OS: [cyan]{os_type}[/cyan]")
+    
+    # 1. Check/Install sshfs
+    if shutil.which("sshfs"):
+        console.print("[green]✓ sshfs is already installed.[/green]")
+    else:
+        console.print("[yellow]! sshfs is missing.[/yellow]")
+        if click.confirm("Do you want to attempt automatic installation of sshfs?"):
+             if os_type == "Darwin":
+                 if shutil.which("brew"):
+                     console.print("Installing macFUSE and sshfs via Homebrew...")
+                     try:
+                        # macfuse check might be tricky as it's a cask, just try install
+                        subprocess.run(["brew", "install", "--cask", "macfuse"], check=False)
+                        subprocess.run(["brew", "install", "gromgit/homebrew-fuse/sshfs"], check=True) 
+                        console.print("[green]sshfs installed successfully.[/green]")
+                     except subprocess.CalledProcessError:
+                        console.print("[red]Homebrew installation failed. Please install sshfs manually.[/red]")
+                 else:
+                     console.print("[red]Homebrew not found. Please install sshfs manually.[/red]")
+             elif os_type == "Linux":
+                 # Heuristic for Linux package managers
+                 pkg_managers = {
+                     "apt-get": ["sudo", "apt-get", "install", "-y", "sshfs"],
+                     "dnf": ["sudo", "dnf", "install", "-y", "sshfs"],
+                     "yum": ["sudo", "yum", "install", "-y", "sshfs"],
+                     "pacman": ["sudo", "pacman", "-S", "--noconfirm", "sshfs"]
+                 }
+                 
+                 installed = False
+                 for pm, cmd in pkg_managers.items():
+                     if shutil.which(pm):
+                         console.print(f"Installing sshfs via {pm}...")
+                         try:
+                             if pm == "apt-get":
+                                 subprocess.run(["sudo", "apt-get", "update"], check=False)
+                             subprocess.run(cmd, check=True)
+                             console.print(f"[green]sshfs installed successfully via {pm}.[/green]")
+                             installed = True
+                             break
+                         except subprocess.CalledProcessError:
+                             console.print(f"[red]Failed to install via {pm}.[/red]")
+                 
+                 if not installed:
+                      console.print("[red]No supported package manager found or installation failed. Please install sshfs manually.[/red]")
+             else:
+                 console.print("[red]Automatic installation not supported for this OS. Please install sshfs manually.[/red]")
+
+    # 2. Configure PATH
+    shell = os.environ.get("SHELL", "")
+    rc_file = None
+    if "zsh" in shell:
+        rc_file = os.path.expanduser("~/.zshrc")
+    elif "bash" in shell:
+        rc_file = os.path.expanduser("~/.bashrc")
+        if os_type == "Darwin" and not os.path.exists(rc_file):
+            rc_file = os.path.expanduser("~/.bash_profile")
+    
+    bin_dir = os.path.expanduser("~/.local/bin") # Standard user bin dir where pip often installs
+    
+    if rc_file and os.path.exists(rc_file):
+        # Check if bin_dir is in PATH (roughly)
+        # Or better, check if we've already added our marker
+        try:
+            with open(rc_file, "r") as f:
+                content = f.read()
+            
+            if "# Added by enc-cli installer" not in content and bin_dir not in os.environ.get("PATH", ""):
+                 console.print(f"It is recommended to ensure [cyan]{bin_dir}[/cyan] is in your PATH.")
+                 if click.confirm(f"Add {bin_dir} to PATH in {rc_file}?"):
+                     with open(rc_file, "a") as f:
+                         f.write("\n")
+                         f.write("# Added by enc-cli installer\n")
+                         f.write(f'export PATH="{bin_dir}:$PATH"\n')
+                     console.print(f"[green]Updated {rc_file}. Please restart your terminal or source the file.[/green]")
+            else:
+                console.print(f"[green]✓ PATH configuration checks pass (found marker or bin_dir implied).[/green]")
+        except Exception as e:
+            console.print(f"[red]Error checking/updating RC file: {e}[/red]")
+    else:
+        console.print(f"[yellow]Could not detect shell RC file. Please ensure '{bin_dir}' is in your PATH.[/yellow]")
+    
+    console.print("\n[bold green]Setup Complete![/bold green] You can now run 'enc init' to configure your client.")
+
+@cli.command("uninstall")
+def uninstall():
+    """Uninstall configuration and cleanup environment."""
+    import shutil
+    import subprocess
+    import platform
+    
+    console.print(Panel("[bold red]ENC Uninstallation[/bold red]", style="red"))
+    
+    if not click.confirm("This will remove your ENC configuration (~/.enc). Continue?"):
+        return
+
+    # 1. Remove ~/.enc
+    enc_dir = os.path.expanduser("~/.enc")
+    if os.path.exists(enc_dir):
+        console.print(f"Removing configuration at {enc_dir}...")
+        try:
+            shutil.rmtree(enc_dir)
+            console.print("[green]Removed configuration directory.[/green]")
+        except Exception as e:
+            console.print(f"[red]Error removing {enc_dir}: {e}[/red]")
+    else:
+        console.print(f"Configuration directory {enc_dir} not found.")
+        
+    # 2. Cleanup PATH
+    shell = os.environ.get("SHELL", "")
+    rc_file = None
+    if "zsh" in shell:
+        rc_file = os.path.expanduser("~/.zshrc")
+    elif "bash" in shell:
+        rc_file = os.path.expanduser("~/.bashrc")
+        if platform.system() == "Darwin" and not os.path.exists(rc_file):
+            rc_file = os.path.expanduser("~/.bash_profile")
+
+    if rc_file and os.path.exists(rc_file):
+        try:
+            with open(rc_file, "r") as f:
+                lines = f.readlines()
+            
+            new_lines = []
+            removed = False
+            skip_next = False
+            
+            # Simple parser to remove the lines we added
+            # We look for "# Added by enc-cli installer" and the following line
+            for i, line in enumerate(lines):
+                 if skip_next:
+                     skip_next = False
+                     continue
+                 if "# Added by enc-cli installer" in line:
+                     removed = True
+                     # The next line should be the export, skip it
+                     skip_next = True 
+                     continue
+                 new_lines.append(line)
+            
+            if removed:
+                if click.confirm(f"Remove enc-cli PATH addition from {rc_file}?"):
+                    with open(rc_file, "w") as f:
+                        f.writelines(new_lines)
+                    console.print(f"[green]Cleaned up {rc_file}.[/green]")
+        except Exception as e:
+             console.print(f"[red]Error cleaning RC file: {e}[/red]")
+
+    # 3. Optional sshfs removal
+    if shutil.which("sshfs"):
+        if click.confirm("Do you want to uninstall sshfs? (Warning: This might affect other apps)"):
+            os_type = platform.system()
+            if os_type == "Darwin":
+                 if shutil.which("brew"):
+                     console.print("Uninstalling sshfs via Homebrew...")
+                     subprocess.run(["brew", "uninstall", "gromgit/homebrew-fuse/sshfs"], check=False)
+                     subprocess.run(["brew", "uninstall", "--cask", "macfuse"], check=False)
+            elif os_type == "Linux":
+                 console.print("[yellow]Please uninstall sshfs manually using your package manager (apt/dnf/etc).[/yellow]")
+
+    console.print("\n[bold green]Cleanup complete.[/bold green]")
+    console.print("To fully remove the enc-cli package, run:\n  [bold]pip uninstall enc-cli[/bold]")
+
+@cli.group()
+def setup():
+    """Setup utilities."""
     pass
 
 @setup.command("ssh-key")

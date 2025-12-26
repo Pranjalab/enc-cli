@@ -61,8 +61,19 @@ class SshfsHandler:
         try:
             # Check if sshfs is installed
             import shutil
-            if not shutil.which("sshfs"):
-                console.print("[bold red]Error: 'sshfs' is not installed.[/bold red] Please run [cyan]. /install.sh[/cyan] again to set up dependencies.")
+            sshfs_path = shutil.which("sshfs")
+            # Fallback for common paths if not in PATH
+            if not sshfs_path:
+                 common_paths = ["/usr/local/bin/sshfs", "/opt/homebrew/bin/sshfs", "/usr/bin/sshfs"]
+                 for p in common_paths:
+                     if os.path.exists(p):
+                         sshfs_path = p
+                         break
+            
+            if not sshfs_path:
+                console.print("[bold red]Error: 'sshfs' is not installed or found.[/bold red] Please run [cyan]enc install[/cyan] to set up dependencies.")
+                # Debug info
+                # console.print(f"PATH: {os.environ.get('PATH')}")
                 return False
 
 

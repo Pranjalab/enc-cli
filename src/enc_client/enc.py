@@ -360,6 +360,7 @@ class Enc:
             self._save_local_session(session_data)
             console.print(f"[bold green]Login Success![/bold green] Session ID: {session_data['session_id']}")
             self.monitor_session()
+            return True
 
     def update_project_info(self, project_name, local_dir=None, server_mount=None, exec_point=None):
         """Update session file with project info."""
@@ -889,6 +890,9 @@ class Enc:
                     data = json.loads(match.group(0))
                     if data.get("status") == "success":
                         server_projects = data.get("projects", {})
+                    else:
+                        console.print(f"[red]Server Error:[/red] {data.get('message')}")
+                        return None
         except Exception:
             pass # Use empty server list if failed
 

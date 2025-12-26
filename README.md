@@ -12,6 +12,7 @@ The **ENC Client** (`enc-cli`) is your secure gateway to the ENC ecosystem. It a
 *   Python 3.8+
 *   `pip`
 *   `sshfs` (Optional, required for mounting projects)
+    > **Note**: If mounting fails, please reinstall sshfs manually: `brew install --cask macfuse && brew install sshfs` or restore from backup.
 
 ### Installer Script
 We provide an easy installer script that handles dependencies and proper path setup:
