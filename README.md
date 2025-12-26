@@ -3,6 +3,7 @@
 > **Part of the [ENC Ecosystem](https://github.com/Pranjalab/enc)**
 >
 > 📚 **[Read the Full Documentation](https://pranjalab.github.io/enc)**
+> [![PyPI](https://img.shields.io/pypi/v/enc-cli?color=green)](https://pypi.org/project/enc-cli/)
 
 The **ENC Client** (`enc-cli`) is your secure gateway to the ENC ecosystem. It allows you to create, manage, and edit encrypted projects from your local machine, seamlessly integrating them with your favorite tools.
 
@@ -14,18 +15,23 @@ The **ENC Client** (`enc-cli`) is your secure gateway to the ENC ecosystem. It a
 *   `sshfs` (Optional, required for mounting projects)
     > **Note**: If mounting fails, please reinstall sshfs manually: `brew install --cask macfuse && brew install sshfs` or restore from backup.
 
-### Installer Script
-We provide an easy installer script that handles dependencies and proper path setup:
+### Installation
+The recommended way to install ENC Client is via `pip`:
 
 ```bash
-cd enc-cli
-./install.sh
+pip install enc-cli
+```
+
+After installing, run the setup command to handle dependencies (like `sshfs`) and environment configuration:
+
+```bash
+enc install
 ```
 
 This will:
-1.  Create a virtual environment.
-2.  Install dependencies (`rich`, `click`, etc.).
-3.  Symlink the `enc` binary to your local bin path (e.g., `~/.local/bin/enc`).
+1.  Check for `sshfs` and attempt to install it if missing.
+2.  Configure your shell `PATH` if needed.
+3.  Guide you to the next step (`enc config init`).
 
 To verify installation:
 ```bash
