@@ -249,7 +249,8 @@ def check_connection():
 @click.option("--password", default=None, help="Password for non-interactive login")
 def login(password):
     """Authenticate with the ENC Server."""
-    enc_manager.login(password=password)
+    if not enc_manager.login(password=password):
+        sys.exit(1)
 
 @cli.group("project")
 def project_group():

@@ -119,6 +119,25 @@ enc logout
 
 ---
 
+## 🛡️ Client-Side Monitoring Protocols
+
+The ENC Client employs active monitoring to ensure session security and clean resource management.
+
+### 1. Project Integrity Monitor
+*   **Function**: Continuously verifies that your local mount points are active and valid.
+*   **Behavior**:
+    *   Checks status every **3 seconds**.
+    *   If a mount point becomes invalid (e.g., directory deleted, connection dropped), it automatically triggers a **forced unmount** cleanup to remove stale handles.
+
+### 2. Session Watchdog
+*   **Function**: Ties your ENC session to your active terminal window.
+*   **Behavior**:
+    *   Runs as a background process monitoring the **Parent PID** (your shell).
+    *   **Auto-Logout**: If you close your terminal window or the shell process terminates, the watchdog immediately triggers a full `enc logout`.
+    *   **Signal Handling**: Captures termination signals (`SIGINT`, `SIGTERM`, `SIGHUP`) to ensure sessions close gracefully even during unexpected shutdowns.
+
+---
+
 ## 🛠 Command Reference
 
 | Command | Description |
