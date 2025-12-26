@@ -4,6 +4,9 @@
 >
 > 📚 **[Read the Full Documentation](https://pranjalab.github.io/enc)**
 > [![PyPI](https://img.shields.io/pypi/v/enc-cli?color=green)](https://pypi.org/project/enc-cli/)
+> [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+> [![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+> [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos-lightgrey)](https://github.com/Pranjalab/enc)
 
 The **ENC Client** (`enc-cli`) is your secure gateway to the ENC ecosystem. It allows you to create, manage, and edit encrypted projects from your local machine, seamlessly integrating them with your favorite tools.
 
