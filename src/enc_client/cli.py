@@ -86,7 +86,7 @@ def interactive_unmount_timer(enc_manager, name, project_dir, timeout=5):
 def cli(ctx, version):
     """ENC Client - Secure Remote Access"""
     if version:
-        console.print("ENC Client v0.1.3")
+        console.print("ENC Client v0.1.5")
         ctx.exit()
     
     if ctx.invoked_subcommand is None:
@@ -410,10 +410,6 @@ def uninstall():
     console.print("\n[bold green]Cleanup complete.[/bold green]")
     console.print("To fully remove the enc-cli package, run:\n  [bold]pip uninstall enc-cli[/bold]")
 
-@cli.group()
-def setup():
-    """Setup utilities."""
-    pass
 
 @setup.command("ssh-key")
 @click.option("--password", default=None, help="Password for auth if SSH key missing")
