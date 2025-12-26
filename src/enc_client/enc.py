@@ -109,7 +109,7 @@ class Enc:
         self.config[key] = value
         self.save_config(self.config, self.active_config_path)
 
-    def setup_ssh_key_flow(self):
+    def setup_ssh_key_flow(self, password=None):
         """Interactive flow to generate and setup SSH key."""
         # 1. Determine local .ssh directory based on ACTIVE config context
         # self.config_dir is set in init (derived from active_config_path)
@@ -156,7 +156,7 @@ class Enc:
         cmd = self.get_remote_cmd(f"server-setup-ssh-key --key {shlex.quote(pub_key_content)}")
         
         # Use existing _run_remote helper which handles SSH execution
-        res = self._run_remote(cmd)
+        res = self._run_remote(cmd, password=password)
         
         if res and res.get("status") == "success":
             console.print("[bold green]Success![/bold green] Server accepted your key.")
@@ -269,102 +269,97 @@ class Enc:
             return f"enc --session-id {session_id} {sub_cmd}"
         return f"enc {sub_cmd}"
 
-    def login(self):
+    def _run_with_password(self, cmd_list, password):
+        """Run command with password authentication using pexpect."""
+        try:
+            cmd_safe = " ".join([shlex.quote(x) for x in cmd_list])
+            child = pexpect.spawn(cmd_safe, encoding='utf-8', timeout=30)
+            
+            while True:
+                idx = child.expect(["(?i)password:", "(?i)continue connecting", pexpect.EOF, pexpect.TIMEOUT, "(?i)permission denied"])
+                
+                if idx == 0:
+                    child.sendline(password)
+                elif idx == 1:
+                    child.sendline("yes")
+                elif idx == 2:
+                    break
+                elif idx == 3:
+                     # Timeout
+                     child.close()
+                     return {"status": "error", "message": "Connection timed out"}
+                elif idx == 4:
+                     child.close()
+                     return {"status": "error", "message": "Permission denied"}
+
+            output = child.before
+            child.close()
+            
+            # Parse JSON
+            match = re.search(r'\{.*\}', output, re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group(0))
+                except:
+                    pass
+            return {"status": "error", "message": f"Invalid response: {output.strip()}"}
+            
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def login(self, password=None):
         """Authenticate with the server and establish a session."""
         base, target = self.get_ssh_base_cmd()
         if not base or not target:
              return
 
         username = self.config.get("username")
-        
-        # 1. Call server-login to get session
-        cmd = list(base)
-        # Force pseudo-tty allocation might be issue for JSON parsing if banners exist
-        # We prefer NO TTY for machine-readable output usually, but SSH might need it for password prompts.
-        # If we need password prompt, we MUST have TTY or use another method (sshpass, or interactive first).
-        # Strategy: Run interactive 'enc login' wrapper? 
-        # For now, let's assume if key-based, simple run works. 
-        # IF password based, subprocess.run capture_output will HANG waiting for password if no TTY.
-        
-        # PROPOSED HYBRID APPROACH:
-        # We need the user to see the password prompt. 
-        # But we need to capture the JSON output. 
-        # SSH makes this hard. 
-        # Option A: Run interactive SSH to a specific "login shell" script.
-        # Option B: Expect the user to have keys set up (User guide says keys optional).
-        # Option C: Use a temporary file on server? No.
-        
-        # Let's try to trust `enc check-connection` established trust/fingerprints.
-        # If we assume `ssh_key` is set, we are good.
-        # If no key, we rely on standard SSH behavior.
-        
-        # For this step, I will use `subprocess.run`. If it prompts for password, it might fail to capture stdout cleanly mixed with prompts.
-        # However, prompts usually go to TTY/stderr.
-        
         console.print(f"Authenticating as {username}...")
         
         login_cmd = ["enc", "server-login", username]
-        full_ssh_cmd = cmd + [target] + login_cmd
+        full_ssh_cmd = list(base) + [target] + login_cmd
         
-        try:
-            # Join command for pexpect spawn
-            cmd_safe = " ".join([shlex.quote(x) for x in full_ssh_cmd])
-            
-            # Spawn SSH process
-            child = pexpect.spawn(cmd_safe, encoding='utf-8', timeout=30)
-            
-            # Expect loop for password or host key or EOF
-            while True:
-                idx = child.expect(["(?i)password:", "(?i)continue connecting", pexpect.EOF, pexpect.TIMEOUT, "(?i)permission denied"])
-                
-                if idx == 0: # Password prompt
-                    password = click.prompt("Enter Server Password", hide_input=True)
-                    child.sendline(password)
-                elif idx == 1: # Host key verification
-                    child.sendline("yes")
-                elif idx == 2: # EOF
-                    break
-                elif idx == 3: # Timeout
-                    console.print(f"[red]Connection timed out. Output received so far:[/red]\n{child.before}")
-                    child.close()
-                    return
-                elif idx == 4: # Permission denied
-                     console.print(f"[red]Authentication failed:[/red] Permission denied.")
-                     child.close()
-                     return
+        session_data = None
+        
+        if password:
+            session_data = self._run_with_password(full_ssh_cmd, password)
+        else:
+             # Interactive logic kept inline or use pexpect with prompt?
+             # For simplicity, let's keep old interactive logic here specially if we want custom prompting
+             # BUT actually we can use _run_with_password if we prompt first!
+             # But SSH prompts effectively.
+             # Let's revert to old manual pexpect for interactive to allow Click prompt
+             try:
+                cmd_safe = " ".join([shlex.quote(x) for x in full_ssh_cmd])
+                child = pexpect.spawn(cmd_safe, encoding='utf-8', timeout=30)
+                while True:
+                    idx = child.expect(["(?i)password:", "(?i)continue connecting", pexpect.EOF, pexpect.TIMEOUT, "(?i)permission denied"])
+                    if idx == 0:
+                        pwd = click.prompt("Enter Server Password", hide_input=True)
+                        child.sendline(pwd)
+                    elif idx == 1:
+                        child.sendline("yes")
+                    elif idx == 2: break
+                    elif idx == 3: return
+                    elif idx == 4: return
 
-            output = child.before
-            child.close()
-            
-            # Clean up output (sometimes SSH adds banner/motd)
-            # We look for the JSON object { "session_id": ... }
-            import re
-            match = re.search(r'\{.*\}', output, re.DOTALL)
-            if match:
-                json_str = match.group(0)
-                try:
-                    session_data = json.loads(json_str)
-                    
-                    if session_data.get("status") == "error":
-                         console.print(f"[red]Login Error:[/red] {session_data.get('message')}")
-                         return
+                output = child.before
+                child.close()
+                match = re.search(r'\{.*\}', output, re.DOTALL)
+                if match:
+                    session_data = json.loads(match.group(0))
+             except Exception as e:
+                 console.print(f"[red]Error:[/red] {e}")
+                 return
 
-                    self._save_local_session(session_data)
-                    console.print(f"[bold green]Login Success![/bold green] Session ID: {session_data['session_id']}")
-                    self.monitor_session()
-                    
-                except json.JSONDecodeError:
-                     console.print(f"[red]Failed to parse login response:[/red] {output}")
-            else:
-                 if child.exitstatus != 0:
-                     console.print(f"[red]Login failed:[/red] {output.strip()}")
-                     console.print("[yellow]Hint: Check username/password or SSH key configuration.[/yellow]")
-                 else:
-                     console.print(f"[red]No session data received from server.[/red]")
-                     console.print(f"Raw Output: {output}")
-                     
-        except Exception as e:
-            console.print(f"[bold red]System Error:[/bold red] {e}")
+        if session_data:
+            if session_data.get("status") == "error":
+                 console.print(f"[red]Login Error:[/red] {session_data.get('message')}")
+                 return
+
+            self._save_local_session(session_data)
+            console.print(f"[bold green]Login Success![/bold green] Session ID: {session_data['session_id']}")
+            self.monitor_session()
 
     def update_project_info(self, project_name, local_dir=None, server_mount=None, exec_point=None):
         """Update session file with project info."""
@@ -635,11 +630,14 @@ class Enc:
             console.print(f"[red]Error:[/red] {e}")
             return False
 
-    def _run_remote(self, remote_cmd_str):
+    def _run_remote(self, remote_cmd_str, password=None):
         """Helper to run a remote command via SSH and parse JSON output."""
         base, target = self.get_ssh_base_cmd()
         full_ssh = base + [target, remote_cmd_str]
         
+        if password:
+             return self._run_with_password(full_ssh, password)
+
         # UX Improvement: If SSH key is configured, try BatchMode first to detect auth failure
         # and warn the user before falling back to password prompt.
         use_key = self.config.get("ssh_key")

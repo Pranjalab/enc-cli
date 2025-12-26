@@ -31,7 +31,7 @@ def interactive_unmount_timer(enc_manager, name, project_dir, timeout=5):
     try:
         import termios
         import tty
-        use_raw = True
+        use_raw = sys.stdin.isatty()
     except ImportError:
         use_raw = False
 
@@ -230,12 +230,13 @@ def setup():
     pass
 
 @setup.command("ssh-key")
-def setup_ssh_key():
+@click.option("--password", default=None, help="Password for auth if SSH key missing")
+def setup_ssh_key(password):
     """Auto-generate and register SSH key with server."""
     if not enc_manager.config.get("session_id"):
         console.print("[yellow]Please login first.[/yellow]")
         return
-    enc_manager.setup_ssh_key_flow()
+    enc_manager.setup_ssh_key_flow(password=password)
 
 # --- Connection Commands ---
 
@@ -245,9 +246,10 @@ def check_connection():
     enc_manager.check_connection()
 
 @cli.command()
-def login():
+@click.option("--password", default=None, help="Password for non-interactive login")
+def login(password):
     """Authenticate with the ENC Server."""
-    enc_manager.login()
+    enc_manager.login(password=password)
 
 @cli.group("project")
 def project_group():
@@ -493,7 +495,7 @@ def user_list(json_output):
     """List users (cached in session)."""
     if not enc_manager.check_permission("user list"):
         console.print("[red]Permission Denied: You are not allowed to list users.[/red]")
-        return
+        ctx.exit(1)
     users = enc_manager.user_list()
     if users:
         table = Table(title="ENC Users")
