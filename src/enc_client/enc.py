@@ -333,6 +333,10 @@ class Enc:
 
     def login(self, password=None):
         """Authenticate with the server and establish a session."""
+        # Pre-flight check: Ensure server is reachable
+        if not self.check_connection():
+             return False
+
         base, target = self.get_ssh_base_cmd()
         if not base or not target:
              return
