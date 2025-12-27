@@ -97,6 +97,10 @@ class Enc:
         
         save_target = target_path if target_path else self.global_config_file
         self.save_config(new_cfg, save_target)
+        
+        # Enforce SSH Key Permissions
+        if ssh_key:
+            self._ensure_ssh_key_permissions(ssh_key)
 
     def set_config_value(self, key, value):
         """Set value in the ACTIVE configuration scope."""
@@ -108,6 +112,26 @@ class Enc:
         
         self.config[key] = value
         self.save_config(self.config, self.active_config_path)
+
+        # Enforce SSH Key Permissions if updating key
+        if key == "ssh_key" and value:
+            self._ensure_ssh_key_permissions(value)
+
+    def _ensure_ssh_key_permissions(self, key_path):
+        """Ensure SSH key has 600 permissions."""
+        if not key_path: return
+        
+        path = os.path.expanduser(key_path)
+        if os.path.exists(path) and os.path.isfile(path):
+            try:
+                # Check current permissions
+                st = os.stat(path)
+                current_mode = st.st_mode & 0o777
+                if current_mode != 0o600:
+                    console.print(f"[yellow]Fixing permissions on {key_path} (was {oct(current_mode)})...[/yellow]")
+                    os.chmod(path, 0o600)
+            except Exception as e:
+                console.print(f"[red]Failed to secure SSH key {key_path}: {e}[/red]")
 
     def setup_ssh_key_flow(self, password=None):
         """Interactive flow to generate and setup SSH key."""
