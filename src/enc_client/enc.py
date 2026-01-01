@@ -13,6 +13,7 @@ import threading
 import signal
 import platform
 from rich.console import Console
+from rich.prompt import Prompt
 from enc_client.session import Session
 
 console = Console()
@@ -134,33 +135,40 @@ class Enc:
                 console.print(f"[red]Failed to secure SSH key {key_path}: {e}[/red]")
 
     def setup_ssh_key_flow(self, password=None):
-        """Interactive flow to generate and setup SSH key."""
-        # 1. Determine local .ssh directory based on ACTIVE config context
-        # self.config_dir is set in init (derived from active_config_path)
-        ssh_dir = os.path.join(self.config_dir, ".ssh")
-        if not os.path.exists(ssh_dir):
-            os.makedirs(ssh_dir, mode=0o700)
-            
-        key_name = "enc_id_rsa"
-        private_key_path = os.path.join(ssh_dir, key_name)
-        public_key_path = private_key_path + ".pub"
+        """Setup SSH key (authorize local key on server)."""
         
-        # 2. Generate Key if missing
-        if not os.path.exists(private_key_path):
-            console.print(f"Generating new SSH key pair in [cyan]{ssh_dir}[/cyan]...")
-            try:
-                # ssh-keygen -t rsa -b 4096 -f path -N "" -q
-                subprocess.run(
-                    ["ssh-keygen", "-t", "rsa", "-b", "4096", "-f", private_key_path, "-N", "", "-q"],
-                    check=True
-                )
-                os.chmod(private_key_path, 0o600)
-                console.print("[green]SSH key pair generated.[/green]")
-            except subprocess.CalledProcessError as e:
-                console.print(f"[red]Failed to generate SSH key:[/red] {e}")
-                return False
+        # 1. Check if key is already configured
+        configured_key = self.config.get("ssh_key")
+        private_key_path = None
+        if configured_key and os.path.exists(os.path.expanduser(configured_key)):
+             private_key_path = os.path.expanduser(configured_key)
+             public_key_path = private_key_path + ".pub"
+             console.print(f"Using configured SSH key: [cyan]{private_key_path}[/cyan]")
         else:
-            console.print(f"Using existing key: [cyan]{private_key_path}[/cyan]")
+            # Generate one in context dir
+            ssh_dir = os.path.join(self.config_dir, ".ssh")
+            if not os.path.exists(ssh_dir):
+                os.makedirs(ssh_dir, mode=0o700)
+                
+            key_name = "enc_id_rsa"
+            private_key_path = os.path.join(ssh_dir, key_name)
+            public_key_path = private_key_path + ".pub"
+            
+            # 2. Generate Key if missing
+            if not os.path.exists(private_key_path):
+                console.print(f"Generating new SSH key pair in [cyan]{ssh_dir}[/cyan]...")
+                try:
+                    subprocess.run(
+                        ["ssh-keygen", "-t", "rsa", "-b", "4096", "-f", private_key_path, "-N", "", "-q"],
+                        check=True
+                    )
+                    os.chmod(private_key_path, 0o600)
+                    console.print("[green]SSH key pair generated.[/green]")
+                except subprocess.CalledProcessError as e:
+                    console.print(f"[red]Failed to generate SSH key:[/red] {e}")
+                    return False
+            else:
+                console.print(f"Using existing key in context: [cyan]{private_key_path}[/cyan]")
             
         # 3. Read Public Key
         try:
@@ -331,7 +339,7 @@ class Enc:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
-    def login(self, password=None):
+    def login(self, password=None, vault_password=None):
         """Authenticate with the server and establish a session."""
         # Pre-flight check: Ensure server is reachable
         if not self.check_connection():
@@ -342,53 +350,57 @@ class Enc:
              return
 
         username = self.config.get("username")
-        console.print(f"Authenticating as {username}...")
+        ssh_key = self.config.get("ssh_key")
+        console.print(f"Authenticating as [bold]{username}[/bold]...")
         
-        login_cmd = ["enc", "server-login", username]
-        full_ssh_cmd = list(base) + [target] + login_cmd
-        
-        session_data = None
-        
-        if password:
-            session_data = self._run_with_password(full_ssh_cmd, password)
+        # Determine authentication strategy
+        if ssh_key and os.path.exists(os.path.expanduser(ssh_key)):
+             # Key-based SSH connection preferred.
+             # We still need a password for BACKUP restoration (environment decryption).
+             v_pwd = vault_password if vault_password else password
+             if not v_pwd:
+                  v_pwd = Prompt.ask("Enter [bold]Backup Vault Password[/bold] (to decrypt your environment)", password=True)
+             
+             login_cmd = self.get_remote_cmd(f"server-login {username} --password {shlex.quote(v_pwd)}")
+             session_data = self._run_remote(login_cmd, password=password)
         else:
-             # Interactive logic kept inline or use pexpect with prompt?
-             # For simplicity, let's keep old interactive logic here specially if we want custom prompting
-             # BUT actually we can use _run_with_password if we prompt first!
-             # But SSH prompts effectively.
-             # Let's revert to old manual pexpect for interactive to allow Click prompt
-             try:
-                cmd_safe = " ".join([shlex.quote(x) for x in full_ssh_cmd])
-                child = pexpect.spawn(cmd_safe, encoding='utf-8', timeout=30)
-                while True:
-                    idx = child.expect(["(?i)password:", "(?i)continue connecting", pexpect.EOF, pexpect.TIMEOUT, "(?i)permission denied"])
-                    if idx == 0:
-                        pwd = click.prompt("Enter Server Password", hide_input=True)
-                        child.sendline(pwd)
-                    elif idx == 1:
-                        child.sendline("yes")
-                    elif idx == 2: break
-                    elif idx == 3: return
-                    elif idx == 4: return
-
-                output = child.before
-                child.close()
-                match = re.search(r'\{.*\}', output, re.DOTALL)
-                if match:
-                    session_data = json.loads(match.group(0))
-             except Exception as e:
-                 console.print(f"[red]Error:[/red] {e}")
-                 return
+             # No key configured. Assume password-based SSH + Backup.
+             sys_pwd = password
+             if not sys_pwd:
+                  sys_pwd = click.prompt("Enter [bold]Server Password[/bold] (Both SSH + Backup)", hide_input=True)
+             
+             v_pwd = vault_password if vault_password else sys_pwd
+             login_cmd = self.get_remote_cmd(f"server-login {username} --password {shlex.quote(v_pwd)}")
+             session_data = self._run_remote(login_cmd, password=sys_pwd)
 
         if session_data:
             if session_data.get("status") == "error":
                  console.print(f"[red]Login Error:[/red] {session_data.get('message')}")
-                 return
+                 return False
 
             self._save_local_session(session_data)
             console.print(f"[bold green]Login Success![/bold green] Session ID: {session_data['session_id']}")
+            
+            # Display restore status
+            restore_info = session_data.get("restore_status", {})
+            source = restore_info.get("source", "none")
+            handler_statuses = restore_info.get("handler_statuses", {})
+            
+            if handler_statuses:
+                status_str = ", ".join([f"{k}: [bold]{v}[/bold]" for k, v in handler_statuses.items()])
+                console.print(f"[dim]Backup connectivity: {status_str}[/dim]")
+
+            if source == "local":
+                 console.print("[green]Restored environment from Local Backup.[/green]")
+            elif source == "gdrive":
+                 console.print("[green]Restored environment from Google Drive.[/green]")
+            elif source == "none":
+                 msg = restore_info.get("message", "Initialized fresh environment.")
+                 console.print(f"[blue]{msg}[/blue]")
+
             self.monitor_session()
             return True
+        return False
 
     def update_project_info(self, project_name, local_dir=None, server_mount=None, exec_point=None):
         """Update session file with project info."""
@@ -401,6 +413,34 @@ class Enc:
         # Update current config context
         self.config["session_id"] = session_data.get("session_id")
         self.save_config(self.config)
+
+    def get_status(self):
+        """Get backup status from server."""
+        session = self.get_session_data()
+        username = None
+        
+        if session:
+             username = session.get("username")
+        else:
+             # Try to get username from config
+             username = self.config.get("username")
+             if not username:
+                  console.print("[yellow]No active session or configured username. Please login or run 'enc config init'.[/yellow]")
+                  return None
+
+        remote_cmd = self.get_remote_cmd(f"server-status {username}")
+        
+        # Use existing _run_remote which handles SSH execution and JSON parsing
+        res = self._run_remote(remote_cmd)
+        
+        if res and isinstance(res, dict) and "status" not in res:
+             # Success - it return the status dict directly
+             return res
+        elif res and res.get("status") == "error":
+             console.print(f"[red]Server Error:[/red] {res.get('message')}")
+             return None
+        
+        return res
 
     def user_list(self):
         """Get list of users. Checks local cache first, then server."""
@@ -426,46 +466,11 @@ class Enc:
         #     return session["user_list"]
             
         # 4. Call Server
-        # console.print("[dim]Fetching user list from server...[/dim]")
-        base, target = self.get_ssh_base_cmd()
-        
-        # Construct command
         remote_cmd = self.get_remote_cmd("user list --json")
-        full_ssh = cmd = list(base) + [target, remote_cmd]
+        data = self._run_remote(remote_cmd)
         
-        try:
-            res = subprocess.run(full_ssh, capture_output=True, text=True)
-            if res.returncode == 0:
-                # Expecting JSON list of users or object with "users" key
-                try:
-                    import re
-                    match = re.search(r'\{.*\}|\[.*\]', res.stdout, re.DOTALL)
-                    if match:
-                        json_str = match.group(0)
-                        data = json.loads(json_str)
-                        
-                        # Handle if wrapped in status object or direct list
-                        users = data
-                        if isinstance(data, dict):
-                            if "users" in data:
-                                users = data["users"]
-                            elif data.get("status") != "success":
-                                console.print(f"[red]Server Error:[/red] {data.get('message')}")
-                                return None
-                                
-                        # 5. Update Cache
-                        self.session_manager.update_session_key(self.config.get("session_id"), "user_list", users)
-                        return users
-                    else:
-                        console.print(f"[red]Invalid Server Response:[/red] {res.stdout}")
-                except json.JSONDecodeError:
-                    console.print(f"[red]Parse Error:[/red] {res.stdout}")
-            else:
-                 console.print(f"[red]Server Error:[/red] {res.stderr}")
-                 
-        except Exception as e:
-             console.print(f"[red]Error:[/red] {e}")
-             
+        if data and data.get("status") == "success":
+             return data.get("users", [])
         return None
 
     def project_init(self, name, password, project_dir):
@@ -527,56 +532,39 @@ class Enc:
         full_ssh = cmd + [target, remote_cmd]
         
         try:
-            # We can now use run/capture_output since password is a flag
-            res = subprocess.run(full_ssh, capture_output=True, text=True)
-            stdout = res.stdout
-            if res.returncode != 0:
-                console.print(f"[red]Init Failed:[/red] {res.stderr}")
-                return False
-
-            try:
-                 # Parse JSON output from server
-                match = re.search(r'\{.*\}', stdout, re.DOTALL)
-                if match:
-                    data = json.loads(match.group(0))
-                    if data.get("status") == "success":
-                         server_mount_point = data.get("mount_point")
-                         if server_mount_point:
-                             from enc_client.sshfs_handler import SshfsHandler
-                             ssh_bridge = SshfsHandler(self.config)
-                             success = ssh_bridge.mount_project(name, project_dir, server_mount_point)
-                             if success:
-                                # Restore backup contents to the new mount
-                                if backup_dir and os.path.exists(backup_dir):
-                                    console.print("[yellow]Restoring files to encrypted vault...[/yellow]")
-                                    for item in os.listdir(backup_dir):
-                                        s = os.path.join(backup_dir, item)
-                                        d = os.path.join(project_dir, item)
-                                        if os.path.isdir(s):
-                                            shutil.copytree(s, d, dirs_exist_ok=True)
-                                            shutil.rmtree(s)
-                                        else:
-                                            shutil.copy2(s, d)
-                                            os.remove(s)
-                                    os.rmdir(backup_dir)
-                                    
-                                console.print(f"[green]Project {name} initialized successfully.[/green]")
-
-                                # update session file with project info
-                                self.update_project_info(name, local_dir=project_dir, server_mount=server_mount_point)
-                            
-                                return True
-                    else:
-                         console.print(f"[red]Server Error:[/red] {data.get('message')}")
-                else:
-                    console.print(f"[red]Invalid Response:[/red] {stdout}")
-            except Exception as e:
-                console.print(f"[red]Parse Error:[/red] {e}")
-                
-            return False
+            # Use _run_remote for consistency and non-interactive handling
+            data = self._run_remote(remote_cmd)
             
+            if data and data.get("status") == "success":
+                 server_mount_point = data.get("mount_point")
+                 if server_mount_point:
+                     from enc_client.sshfs_handler import SshfsHandler
+                     ssh_bridge = SshfsHandler(self.config)
+                     success = ssh_bridge.mount_project(name, project_dir, server_mount_point)
+                     if success:
+                        # Restore backup contents to the new mount
+                        if backup_dir and os.path.exists(backup_dir):
+                            console.print("[yellow]Restoring files to encrypted vault...[/yellow]")
+                            for item in os.listdir(backup_dir):
+                                s = os.path.join(backup_dir, item)
+                                d = os.path.join(project_dir, item)
+                                if os.path.isdir(s):
+                                    shutil.copytree(s, d, dirs_exist_ok=True)
+                                    shutil.rmtree(s)
+                                else:
+                                    shutil.copy2(s, d)
+                                    os.remove(s)
+                            os.rmdir(backup_dir)
+                            
+                        console.print(f"[green]Project {name} initialized successfully.[/green]")
+                        # update session file with project info
+                        self.update_project_info(name, local_dir=project_dir, server_mount=server_mount_point)
+                        return True
+                 else:
+                     console.print(f"[red]Server Error:[/red] {data.get('message') if data else 'Unknown error'}")
+            return False
         except Exception as e:
-            console.print(f"[red]Error:[/red] {e}")
+            console.print(f"[red]Error during project init:[/red] {e}")
             return False
 
     def monitor_project(self, session_id, name):
@@ -674,28 +662,23 @@ class Enc:
         try:
             if use_key:
                 # Try with BatchMode=yes to fail fast if key doesn't work
-                batch_cmd = base + ["-o", "BatchMode=yes", target, remote_cmd_str]
+                strict_opts = [
+                    "-o", "BatchMode=yes", 
+                    "-o", "ConnectTimeout=5",
+                    "-o", "KbdInteractiveAuthentication=no",
+                    "-o", "PasswordAuthentication=no"
+                ]
+                batch_cmd = base + strict_opts + [target, remote_cmd_str]
                 res = subprocess.run(batch_cmd, capture_output=True, text=True)
                 
                 if res.returncode == 255: # SSH Error (likely auth)
-                     console.print("[yellow]SSH Key authentication failed. Falling back to password...[/yellow]")
-                     # Proceed to run normally (which allows interactive password if not capturing output, 
-                     # but here we capture output. SSH usually prompts on TTY even if stdout is captured, 
-                     # but stdin might matter. subprocess.run captures stdin by default?)
-                     # subprocess.run w/ capture_output closes stdin? No.
-                     # But ssh needs a TTY for password. 
-                     
-                     # Since we use capture_output=True, SSH password prompt might fail or be hidden.
-                     # However, typical Enc usage for remote commands assumes non-interactive/json response.
-                     # If we need password, we might be stuck.
-                     
-                     # Actually, if we capture output, we can't easily interact with password prompt 
-                     # unless we don't capture. But we need to capture to parse JSON.
-                     # Sshpass or expect would be needed, or we just let it fail and tell user "Check key or set up agent".
-                     
-                     # Wait, user said "ask for password". 
-                     # If we can't support interactive password with capture_output, we should just warn.
-                     pass 
+                     console.print("[yellow]SSH Key authentication failed.[/yellow]")
+                     # If non-interactive, do not prompt
+                     if not os.isatty(0) or os.environ.get("ENC_NON_INTERACTIVE"):
+                         return {"status": "error", "message": "SSH Authentication failed (non-interactive)."}
+                         
+                     password = click.prompt("Enter Server Password to continue", hide_input=True)
+                     return self._run_with_password(full_ssh, password)
                 else:
                     # Key auth worked (or other error but not connectivity/auth)
                     if res.returncode != 0:
@@ -708,7 +691,18 @@ class Enc:
                     return {"status": "error", "message": f"Invalid server response: {res.stdout.strip()}"}
 
             # Fallback or standard run
-            res = subprocess.run(full_ssh, capture_output=True, text=True)
+            final_cmd = full_ssh
+            if not os.isatty(0) or os.environ.get("ENC_NON_INTERACTIVE"):
+                 # Force strict BatchMode in non-interactive environments to prevent hangs
+                 strict_opts = [
+                     "-o", "BatchMode=yes", 
+                     "-o", "ConnectTimeout=5",
+                     "-o", "KbdInteractiveAuthentication=no",
+                     "-o", "PasswordAuthentication=no"
+                 ]
+                 final_cmd = base + strict_opts + [target, remote_cmd_str]
+                 
+            res = subprocess.run(final_cmd, capture_output=True, text=True)
             if res.returncode != 0:
                 return {"status": "error", "message": f"SSH Error: {res.stderr.strip()}"}
             
@@ -720,24 +714,70 @@ class Enc:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
-    def project_remove(self, name, password):
+    def project_remove(self, name, password, forced=False):
          """Remove a project from server and delete local files."""
          # 1. Permission Check
          if not self.check_permission("server-project-remove"):
              console.print("[red]Access Denied: You do not have permission to remove projects.[/red]")
              return False
 
+         if forced:
+             if not click.confirm(f"FORCE REMOVE: This will PERMANENTLY DELETE project '{name}' on the server. Are you sure?", abort=True):
+                 return False
+                 
+             cmd = self.get_remote_cmd(f"server-project-remove {shlex.quote(name)} --forced")
+             res = self._run_remote(cmd)
+             
+             if res and res.get("status") == "success":
+                 console.print(f"[green]Project '{name}' successfully force-removed.[/green]")
+                 # Local cleanup
+                 self.project_unmount(name, forced=True)
+                 return True
+             else:
+                 console.print(f"[red]Failed to force-remove project on server:[/red] {res.get('message') if res else 'Unknown error'}")
+                 return False
+
          console.print(f"To remove project '{name}', we must verify ownership by mounting it first.")
          
          session_id = self.config.get("session_id")
-         if self.session_manager.is_project_active(session_id, name):
+         if not self.session_manager.is_project_active(session_id, name):
+             # Mount to temp dir for verification
+             import tempfile
+             
+             temp_mount = tempfile.mkdtemp()
+             try:
+                 console.print(f"Mounting '{name}' for verification...")
+                 success = self.project_mount(name, password, local_dir=temp_mount)
+                 if not success:
+                     console.print("[red]Authentication failed. Cannot remove project.[/red]")
+                     return False
+                 
+                 # 3. Confirmation
+                 if not click.confirm(f"WARNING: This will PERMANENTLY DELETE project '{name}' and all its files from the server. Are you sure?", abort=True):
+                     return False
+
+                 # 5. Call Server Remove
+                 cmd = self.get_remote_cmd(f"server-project-remove {shlex.quote(name)}")
+                 res = self._run_remote(cmd)
+                 
+                 if res and res.get("status") == "success":
+                     console.print(f"[green]Project '{name}' successfully removed.[/green]")
+                     return True
+                 else:
+                     console.print(f"[red]Failed to remove project on server:[/red] {res.get('message') if res else 'Unknown error'}")
+                     return False
+             finally:
+                 # Ensure we unmount and cleanup
+                 self.project_unmount(name, local_dir=temp_mount, forced=True)
+                 if os.path.exists(temp_mount):
+                     shutil.rmtree(temp_mount, ignore_errors=True)
+         else:
              console.print(f"[yellow]Project '{name}' is already active. Proceeding with removal.[/yellow]")
-             # Logic for ALREADY MOUNTED project
              if not click.confirm(f"WARNING: This will PERMANENTLY DELETE project '{name}' and all its files from the server. Are you sure?", abort=True):
                  return False
 
              # Call Server Remove
-             cmd = self.get_remote_cmd(f"server-project-remove {name}")
+             cmd = self.get_remote_cmd(f"server-project-remove {shlex.quote(name)}")
              res = self._run_remote(cmd)
              
              # Unmount (locally)
@@ -749,52 +789,6 @@ class Enc:
              else:
                  console.print(f"[red]Failed to remove project on server:[/red] {res.get('message') if res else 'Unknown error'}")
                  return False
-         else:
-             # Mount to temp dir for verification
-             import tempfile
-             # We use a try...finally block around the temp dir usage if we were manually managing it,
-             # but TemporaryDirectory handles cleanup on exit.
-             # THE ISSUE was that project_unmount wasn't called before cleanup.
-             # We must ensure unmount happens.
-             
-             temp_mount = tempfile.mkdtemp()
-             try:
-                 console.print(f"Mounting '{name}' for verification...")
-                 success = self.project_mount(name, password, local_dir=temp_mount)
-                 if not success:
-                     console.print("[red]Authentication failed. Cannot remove project.[/red]")
-                     return False
-                 
-                 try:
-                     # 3. Confirmation
-                     if not click.confirm(f"WARNING: This will PERMANENTLY DELETE project '{name}' and all its files. Are you sure?", abort=True):
-                         return False
-
-                     # 5. Call Server Remove
-                     cmd = self.get_remote_cmd(f"server-project-remove {name}")
-                     res = self._run_remote(cmd)
-                     
-                     if res and res.get("status") == "success":
-                         console.print(f"[green]Project '{name}' successfully removed.[/green]")
-                         return True
-                     else:
-                         console.print(f"[red]Failed to remove project on server:[/red] {res.get('message') if res else 'Unknown error'}")
-                         return False
-                 finally:
-                     # 6. Unmount - MUST happen before we try to remove temp dir
-                     # We force unmount to ensure bridge is killed
-                     self.project_unmount(name, local_dir=temp_mount, forced=True)
-             finally:
-                 # Cleanup temp dir
-                 if os.path.exists(temp_mount):
-                     shutil.rmtree(temp_mount, ignore_errors=True)
-
-         # 5. Call Server Remove
-         cmd = self.get_remote_cmd(f"server-project-remove {name}")
-         res = self._run_remote(cmd)
-         
-         # 6. Unmount
-         self.project_unmount(name) # Auto-detects path
          
          if res and res.get("status") == "success":
              console.print(f"[green]Project '{name}' successfully removed.[/green]")
@@ -870,32 +864,18 @@ class Enc:
 
     def start_project_removal(self, name):
         """Call server to permanently remove project."""
-        base, target = self.get_ssh_base_cmd()
         remote_cmd = self.get_remote_cmd(f"server-project-remove {name}")
-        cmd = list(base) + [target, remote_cmd]
+        data = self._run_remote(remote_cmd)
         
-        try:
-            res = subprocess.run(cmd, capture_output=True, text=True)
-            if res.returncode == 0:
-                match = re.search(r'\{.*\}', res.stdout, re.DOTALL)
-                if match:
-                    data = json.loads(match.group(0))
-                    if data.get("status") == "success":
-                        console.print(f"[green]Project '{name}' deleted successfully.[/green]")
-                        # Remove from session entirely
-                        session_id = self.config.get("session_id")
-                        self.session_manager.remove_project(session_id, name)
-                        return True
-                    else:
-                        console.print(f"[red]Server Error:[/red] {data.get('message', 'Unknown Error')}")
-                else:
-                    console.print(f"[red]Invalid Response:[/red] {res.stdout}")
-            else:
-                console.print(f"[red]Remote Error:[/red] {res.stderr}")
-            return False
-        except Exception as e:
-            console.print(f"[red]Error:[/red] {e}")
-            return False
+        if data and data.get("status") == "success":
+            console.print(f"[green]Project '{name}' deleted successfully.[/green]")
+            # Remove from session entirely
+            session_id = self.config.get("session_id")
+            self.session_manager.remove_project(session_id, name)
+            return True
+        else:
+            console.print(f"[red]Server Error:[/red] {data.get('message', 'Unknown Error') if data else 'Unknown Error'}")
+        return False
 
     def is_project_active(self, name):
         """Check if project is active in current session."""
@@ -905,25 +885,14 @@ class Enc:
     def project_list(self):
         """Get the merged list of projects (Server + Local Session)."""
         # 1. Fetch Server List
-        base, target = self.get_ssh_base_cmd()
         remote_cmd = self.get_remote_cmd("server-project-list")
-        cmd = list(base) + [target, remote_cmd]
-        
         server_projects = {}
-        try:
-            res = subprocess.run(cmd, capture_output=True, text=True)
-            if res.returncode == 0:
-                match = re.search(r'\{.*\}', res.stdout, re.DOTALL)
-                if match:
-                    data = json.loads(match.group(0))
-                    if data.get("status") == "success":
-                        server_projects = data.get("projects", {})
-                    else:
-                        console.print(f"[red]Server Error:[/red] {data.get('message')}")
-                        return None
-        except Exception:
-            pass # Use empty server list if failed
-
+        data = self._run_remote(remote_cmd)
+        if data and data.get("status") == "success":
+             server_projects = data.get("projects", {})
+        elif data and data.get("status") == "error":
+             console.print(f"[red]Server Error:[/red] {data.get('message')}")
+             return None
         # 2. Load Local Session
         session_id = self.config.get("session_id")
         session_data = self.session_manager.load_session(session_id)
@@ -1080,7 +1049,7 @@ class Enc:
         except Exception:
             pass
 
-    def logout(self):
+    def logout(self, vault_password=None):
         """Clear local session state."""
 
         # if project is mounted then unmount it
@@ -1089,8 +1058,11 @@ class Enc:
         # Check for any remaining stray mounts not tracked in session
         self.cleanup_stray_mounts()
 
-        # Optional: Call server-logout to invalidate on server side too?
-        # Yes, good practice.
+        # Vault Password handling for logout (optional, server will use cache if missing)
+        # if not vault_password:
+        #      vault_password = Prompt.ask("Enter Backup Vault Password to secure logout", password=True)
+
+        # Call server-logout to invalidate on server side and trigger backup
         base, target = self.get_ssh_base_cmd()
         username = self.config.get("username")
         
@@ -1098,11 +1070,43 @@ class Enc:
             try:
                 session_id = self.config.get("session_id")
                 if session_id:
-                    remote_cmd = self.get_remote_cmd(f"server-logout {session_id}")
-                    logout_cmd = list(base) + [target, remote_cmd]
-                    subprocess.run(logout_cmd, capture_output=True)
-            except: 
-                pass # Ignore network errors during logout
+                    # Pass vault password to server-logout
+                    # We use _run_remote which handles password authentication if provided
+                    cmd_str = f"server-logout {session_id}"
+                    if vault_password:
+                        cmd_str += f" --password {shlex.quote(vault_password)}"
+                    
+                    remote_cmd = self.get_remote_cmd(cmd_str)
+                    logout_res = self._run_remote(remote_cmd, password=vault_password)
+                    
+                    if logout_res and logout_res.get("status") == "success":
+                        backup_info = logout_res.get("backup_status", {})
+                        backups = backup_info.get("backups", {})
+                        handler_statuses = backup_info.get("handler_statuses", {})
+                        
+                        if handler_statuses:
+                            status_str = ", ".join([f"{k}: [bold]{v}[/bold]" for k, v in handler_statuses.items()])
+                            console.print(f"[dim]Backup connectivity: {status_str}[/dim]")
+
+                        if backups.get("local") == "success":
+                            console.print("[green]Local backup successful.[/green]")
+                        elif backups.get("local") == "failed":
+                            console.print("[red]Local backup FAILED.[/red]")
+                        elif backups.get("local") == "disconnected":
+                            console.print("[yellow]Local backup skipped (disconnected).[/yellow]")
+                            
+                        if backups.get("gdrive") == "pending":
+                            console.print("[blue]Google Drive sync started in background.[/blue]")
+                        elif backups.get("gdrive") == "success":
+                            console.print("[green]Google Drive backup successful.[/green]")
+                        elif backups.get("gdrive") == "failed":
+                            console.print("[red]Google Drive backup FAILED.[/red]")
+                        elif backups.get("gdrive") == "disconnected":
+                            console.print("[yellow]Google Drive backup skipped (disconnected).[/yellow]")
+                    elif logout_res and logout_res.get("status") == "error":
+                        console.print(f"[red]Logout Error:[/red] {logout_res.get('message')}")
+            except Exception as e:
+                console.print(f"[yellow]Warning: Server-side logout failed:[/yellow] {e}")
         
         # Clear local
         # save loging out command in session file logs
@@ -1117,46 +1121,21 @@ class Enc:
 
     def user_create(self, username, password, role, ssh_key=None):
         """Call enc user create."""
-        base, target = self.get_ssh_base_cmd()
-        
-        # New standardized command
-        remote_cmd_str = f"user create {username} --password {password} --role {role} --json"
+        remote_cmd_str = f"user create {username} --password {shlex.quote(password)} --role {shlex.quote(role)} --json"
         
         if ssh_key:
-             remote_cmd_str += f' --ssh-key "{ssh_key}"'
+             remote_cmd_str += f' --ssh-key {shlex.quote(ssh_key)}'
              
-        cmd = list(base) + [
-            target, 
-            self.get_remote_cmd(remote_cmd_str)
-        ]
-        
-        try:
-            # We assume current session user is admin
-            res = subprocess.run(cmd, capture_output=True, text=True)
-            if res.returncode == 0 and "success" in res.stdout:
-                return True
-            else:
-                console.print(f"[red]Server Error:[/red] {res.stdout} {res.stderr}")
-                return False
-        except Exception as e:
-            console.print(f"[red]Error:[/red] {e}")
-            return False
+        remote_cmd = self.get_remote_cmd(remote_cmd_str)
+        data = self._run_remote(remote_cmd)
+        if data and data.get("status") == "success":
+             return True
+        return False
 
     def user_delete(self, username):
         """Call enc user remove."""
-        base, target = self.get_ssh_base_cmd()
-        # New standardized command
-        cmd = list(base) + [
-            target, 
-            self.get_remote_cmd(f"user remove {username} --json")
-        ]
-        try:
-            res = subprocess.run(cmd, capture_output=True, text=True)
-            if res.returncode == 0 and "success" in res.stdout:
-                return True
-            else:
-                 console.print(f"[red]Server Error:[/red] {res.stdout} {res.stderr}")
-                 return False
-        except Exception as e:
-            console.print(f"[red]Error:[/red] {e}")
-            return False
+        remote_cmd = self.get_remote_cmd(f"user remove {shlex.quote(username)} --json")
+        data = self._run_remote(remote_cmd)
+        if data and data.get("status") == "success":
+             return True
+        return False

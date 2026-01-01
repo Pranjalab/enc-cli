@@ -181,6 +181,36 @@ def set_ssh_key(ssh_key):
     enc_manager.set_config_value("ssh_key", ssh_key)
     console.print(f"Set SSH Key to: [green]{ssh_key}[/green]")
 
+@cli.command("status")
+def status():
+    """Show current backup and environment status."""
+    data = enc_manager.get_status()
+    if data is None:
+        return
+
+    table = Table(title="ENC Backup & Environment Status")
+    table.add_column("Backup Method", style="cyan")
+    table.add_column("Available", style="magenta")
+    table.add_column("Status", style="green")
+
+    if not data:
+        console.print("[yellow]No backup methods configured or status data missing.[/yellow]")
+        return
+
+    for method, info in data.items():
+        available = "[green]True[/green]" if info.get("available") else "[red]False[/red]"
+        status_val = info.get("status", "None")
+        
+        # Color code status
+        status_style = "green"
+        if status_val == "syncing": status_style = "blue"
+        elif status_val == "Failed": status_style = "red"
+        elif status_val == "None": status_style = "dim"
+        
+        table.add_row(method.capitalize(), available, f"[{status_style}]{status_val}[/{status_style}]")
+
+    console.print(table)
+
 @cli.command("init")
 @click.argument("path", required=False, default=".")
 def init(path):
@@ -215,6 +245,16 @@ def init(path):
     enc_manager.init_config(url, username, ssh_key, target_path=target_path)
     console.print(f"[bold green]Configuration initialized at {target_path}[/bold green]")
     console.print("Run 'enc check-connection' to verify.")
+
+@cli.command("setup-ssh-key")
+@click.option("-p", "--password", help="Server password for authentication.")
+def setup_ssh_key(password):
+    """Authorize a local SSH key on the server."""
+    if enc_manager.setup_ssh_key_flow(password=password):
+         console.print("[bold green]SSH key set up successfully.[/bold green]")
+    else:
+         console.print("[bold red]SSH key setup failed.[/bold red]")
+         sys.exit(1)
 
 @cli.command("internal-watchdog", hidden=True)
 @click.option("--ppid", type=int, help="Parent PID to monitor")
@@ -428,10 +468,11 @@ def check_connection():
     enc_manager.check_connection()
 
 @cli.command()
-@click.option("--password", default=None, help="Password for non-interactive login")
-def login(password):
+@click.option("--password", default=None, help="System/SSH password for non-interactive login")
+@click.option("--vault-password", default=None, help="Password for the encrypted backup vault")
+def login(password, vault_password):
     """Authenticate with the ENC Server."""
-    if not enc_manager.login(password=password):
+    if not enc_manager.login(password=password, vault_password=vault_password):
         raise click.ClickException("Authentication failed. Please check your credentials.")
 
 @cli.group("project")
@@ -554,16 +595,17 @@ def project_list():
 @project_group.command("remove")
 @click.argument("name")
 @click.option("--password", "-p", default=None, help="Project password")
-def project_remove(name, password):
+@click.option("--forced", "-f", is_flag=True, help="Force remove stale directories even if access check fails.")
+def project_remove(name, password, forced):
     """Permanently delete a project."""
     if not enc_manager.config.get("session_id"):
         console.print("[yellow]Please login first.[/yellow]")
         return
     
-    if not password:
+    if not forced and not password:
          password = click.prompt("Enter Project Password (required for verification)", hide_input=True)
          
-    enc_manager.project_remove(name, password)
+    enc_manager.project_remove(name, password, forced=forced)
 
 @project_group.command("mount")
 @click.argument("name")
@@ -656,12 +698,13 @@ def project_run(name, command):
         pass
 
 @cli.command()
-def logout():
+@click.option("--vault-password", default=None, help="Password to encrypt the backup vault on logout")
+def logout(vault_password):
     if not enc_manager.config.get("session_id"):
         console.print("[yellow]Please login first.[/yellow]")
         return
     """Logout and clear local sessions."""
-    if enc_manager.logout():
+    if enc_manager.logout(vault_password=vault_password):
         console.print("[bold green]Logged out successfully.[/bold green] Local sessions cleared.")
     else:
         console.print("[yellow]No active session or error clearing session.[/yellow]")
